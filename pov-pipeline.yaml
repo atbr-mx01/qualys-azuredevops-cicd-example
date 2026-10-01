@@ -1,0 +1,99 @@
+# Escaneo de imagen con QScanner + evaluacion de politica (gate del build)
+# No requiere el sensor CI/CD: QScanner es un binario independiente.
+
+trigger:
+- main
+
+# Agente de Microsoft (equivalente a 'runs-on: ubuntu-latest').
+# Para usar tu agente propio, reemplaza estas dos lineas por:
+#   pool:
+#     name: DEDICATED-POOL
+pool:
+  vmImage: 'ubuntu-latest'
+
+parameters:
+  - name: image
+    displayName: 'Imagen a escanear'
+    type: string
+    default: 'tomcat:10.0.0-M6-jdk11-corretto'
+
+variables:
+  QSCANNER_VERSION: 'v5.2.0'
+  QUALYS_POD: 'US2'
+  # Tag de la politica configurada en Qualys (Container Security > Policies).
+  # Si ningun tag coincide, Qualys evalua la politica por defecto.
+  POLICY_TAGS: 'poc_image_policy'
+  RESULTS_DIR: '$(Build.ArtifactStagingDirectory)/qualys'
+
+steps:
+# ─────────────────────────────────────────
+# PASO 1: Descargar la imagen a escanear
+# ─────────────────────────────────────────
+  - task: Bash@3
+    displayName: "Pull de la imagen"
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -euo pipefail
+        echo "Imagen: ${{ parameters.image }}"
+        docker pull "${{ parameters.image }}"
+        docker image inspect "${{ parameters.image }}" --format '{{.RepoDigests}}'
+
+# ─────────────────────────────────────────
+# PASO 2: Descargar QScanner
+# ─────────────────────────────────────────
+  - task: Bash@3
+    displayName: "Descargar QScanner"
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -euo pipefail
+        cd "$(Build.SourcesDirectory)"
+        curl -fsSL "https://www.qualys.com/qscanner/download/$(QSCANNER_VERSION)/download_qscanner.sh" -o download_qscanner.sh
+        chmod +x download_qscanner.sh
+        ./download_qscanner.sh
+        chmod +x linux-amd64/qscanner
+        ./linux-amd64/qscanner --version
+
+# ─────────────────────────────────────────
+# PASO 3: Escanear y evaluar la politica
+# QScanner sale con codigo 42 o 43 si la politica se incumple,
+# lo que hace fallar este paso y con el, el pipeline.
+# ─────────────────────────────────────────
+  - task: Bash@3
+    displayName: "Escaneo Qualys (gate de politica)"
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -euo pipefail
+        cd "$(Build.SourcesDirectory)"
+
+        # El token va por variable de entorno, nunca como argumento:
+        # los argumentos quedan visibles en el log del pipeline.
+        if [[ -z "${QUALYS_ACCESS_TOKEN:-}" || "$QUALYS_ACCESS_TOKEN" != eyJ* ]]; then
+          echo "##[error]QUALYS_ACCESS_TOKEN ausente o con prefijo. Debe empezar en 'eyJ', sin comillas ni 'Bearer '."
+          exit 1
+        fi
+
+        mkdir -p "$(RESULTS_DIR)"
+
+        # Para bloquear el build por política, usar en su lugar:
+        #   --mode evaluate-policy --policy-tags cicd
+        ./linux-amd64/qscanner image "${{ parameters.image }}" \
+          --mode get-report \
+          --report-format table,json,sarif \
+          --pod "$(QUALYS_POD)" \
+          --output-dir "$(RESULTS_DIR)"
+    env:
+      QUALYS_ACCESS_TOKEN: $(QUALYS_ACCESS_TOKEN)   # variable secreta del pipeline
+
+# ─────────────────────────────────────────
+# PASO 4: Publicar el reporte (aunque el gate falle)
+# ─────────────────────────────────────────
+  - task: PublishPipelineArtifact@1
+    displayName: "Publicar reporte Qualys"
+    condition: always()
+    inputs:
+      targetPath: '$(RESULTS_DIR)'
+      artifact: 'qualys-report'
+      publishLocation: 'pipeline'
