@@ -69,11 +69,6 @@ steps:
         cd "$(Build.SourcesDirectory)"
 
         # El token va por variable de entorno, nunca como argumento:
-        # los argumentos quedan visibles en el log del pipeline.
-        if [[ -z "${QUALYS_ACCESS_TOKEN:-}" || "$QUALYS_ACCESS_TOKEN" != eyJ* ]]; then
-          echo "##[error]QUALYS_ACCESS_TOKEN ausente o con prefijo. Debe empezar en 'eyJ', sin comillas ni 'Bearer '."
-          exit 1
-        fi
 
         mkdir -p "$(RESULTS_DIR)"
 
